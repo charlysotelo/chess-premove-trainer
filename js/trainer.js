@@ -12,6 +12,36 @@ let blackMoveTimeout = null;
 let currentScenario = 'kq';
 let customFen = '';
 
+function updateScenarioVideo() {
+    const tile = document.getElementById('videoTile');
+    const iframe = document.getElementById('scenarioVideo');
+    if (!tile || !iframe) return;
+
+    // Hide by default (e.g. Custom FEN)
+    let src = '';
+
+    if (currentScenario === 'resetMate') {
+        src = 'https://www.youtube.com/embed/prgvSGbjkSU?si=UCiKtz3XptuoXRG4';
+    } else if (currentScenario === 'kq') {
+        // K+Q vs K
+        src = 'https://www.youtube.com/embed/jquaz5axNC4?si=d0dfjIOhLcQIytt2&start=1683';
+    }
+
+    if (!src) {
+        tile.style.display = 'none';
+        // Clear src to stop playback when switching away
+        iframe.src = '';
+        return;
+    }
+
+    tile.style.display = 'block';
+
+    // Only set when changed to avoid resetting playback unnecessarily
+    if (iframe.src !== src) {
+        iframe.src = src;
+    }
+}
+
 // Generate a random starting position for king + queen vs king
 function generateRandomPosition() {
     game.clear();
@@ -589,6 +619,7 @@ function applyTimeSetting(side, seconds) {
 
 function setScenario(value) {
     currentScenario = value === 'resetMate' ? 'resetMate' : (value === 'customFen' ? 'customFen' : 'kq');
+    updateScenarioVideo();
 
     const customControls = document.getElementById('customScenarioControls');
     const customError = document.getElementById('customFenError');
@@ -681,6 +712,7 @@ function initTrainer() {
     const scenarioSelect = document.getElementById('scenarioSelect');
     if (scenarioSelect) {
         currentScenario = scenarioSelect.value === 'resetMate' ? 'resetMate' : (scenarioSelect.value === 'customFen' ? 'customFen' : 'kq');
+        updateScenarioVideo();
         scenarioSelect.addEventListener('change', function () {
             setScenario(this.value);
         });

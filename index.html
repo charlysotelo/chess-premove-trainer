@@ -51,8 +51,25 @@
         <div class="timer" id="whiteTimer">White: 5.0s</div>
         <div class="timer" id="blackTimer">Black: 60.0s</div>
     </div>
-    
-    <div id="board"></div>
+
+    <div class="board-and-video">
+        <div id="board"></div>
+
+        <div id="videoTile" aria-label="Scenario video" style="display: none;">
+            <iframe
+                id="scenarioVideo"
+                width="560"
+                height="315"
+                src=""
+                title="YouTube video player"
+                frameborder="0"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                referrerpolicy="strict-origin-when-cross-origin"
+                allowfullscreen
+            ></iframe>
+        </div>
+    </div>
+
     <div id="status">Move the white pieces to checkmate black!</div>
     
     <div>
