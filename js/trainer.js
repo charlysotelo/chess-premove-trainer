@@ -11,6 +11,106 @@ let blackMoveDelay = 1.0;
 let blackMoveTimeout = null;
 let currentScenario = 'kq';
 let customFen = '';
+let premoveAutoPending = false;
+let premoveAutoTimeout = null;
+let dragStartedOnTurn = null;
+let dragStartedAtMs = 0;
+let lastDragSource = null;
+
+const PMDBG_TAG = 'PMDBG';
+let pmdbgLastSuspiciousLogAt = 0;
+let pmdbgLastTurn = null;
+let pmdbgLastFen = null;
+
+function pmdbgEnabled() {
+    try {
+        // Enable via DevTools:
+        //   localStorage.setItem('debugPremove', '1'); location.reload();
+        // or:
+        //   window.DEBUG_PREMOVE = true;
+        if (typeof window !== 'undefined' && window.DEBUG_PREMOVE === true) return true;
+        if (typeof localStorage !== 'undefined' && localStorage.getItem('debugPremove') === '1') return true;
+    } catch (e) {
+        // ignore
+    }
+    return false;
+}
+
+function pmdbgNowMs() {
+    if (typeof performance !== 'undefined' && typeof performance.now === 'function') return performance.now();
+    return Date.now();
+}
+
+function pmdbgState(extra) {
+    let fen = '';
+    try { fen = game.fen(); } catch (e) { fen = ''; }
+
+    return {
+        t: new Date().toISOString(),
+        turn: (() => { try { return game.turn(); } catch (e) { return '?'; } })(),
+        inCheck: (() => { try { return game.in_check(); } catch (e) { return null; } })(),
+        inMate: (() => { try { return game.in_checkmate(); } catch (e) { return null; } })(),
+        gameOver: (() => { try { return game.game_over(); } catch (e) { return null; } })(),
+        fen,
+        whiteTime,
+        blackTime,
+        premovesLen: premoves.length,
+        premoveAutoPending,
+        blackMoveTimeoutActive: !!blackMoveTimeout,
+        premoveAutoTimeoutActive: !!premoveAutoTimeout,
+        ...(extra || {})
+    };
+}
+
+function pmdbgLog(event, extra) {
+    if (!pmdbgEnabled()) return;
+    // Keep logs machine-greppable.
+    try {
+        console.log(`[${PMDBG_TAG}] ${event}`, pmdbgState(extra));
+    } catch (e) {
+        // ignore
+    }
+}
+
+function pmdbgWarn(event, extra) {
+    if (!pmdbgEnabled()) return;
+    try {
+        console.warn(`[${PMDBG_TAG}] ${event}`, pmdbgState(extra));
+    } catch (e) {
+        // ignore
+    }
+}
+
+function clearPremoves(reason, options) {
+    const opts = options || {};
+    const didHavePremoves = premoves.length > 0;
+    const preview = didHavePremoves ? premoves.slice(0, 6) : [];
+
+    premoves = [];
+
+    // Clearing the queue should also cancel any pending auto-execution.
+    premoveAutoPending = false;
+    if (premoveAutoTimeout) {
+        clearTimeout(premoveAutoTimeout);
+        premoveAutoTimeout = null;
+    }
+
+    // Put the reason into the event string so it shows even in collapsed console output.
+    if (didHavePremoves) {
+        pmdbgLog(`premoves_cleared reason=${reason}`, { reason, preview });
+    } else {
+        pmdbgLog(`premoves_cleared_empty reason=${reason}`, { reason });
+    }
+
+    if (opts.removeHighlights !== false) {
+        try { removeHighlights(); } catch (e) { /* ignore */ }
+    }
+
+    // Avoid visual desync: if we cleared the queue, ensure board reflects the real game state.
+    if (opts.snapBoard !== false && board) {
+        try { board.position(game.fen(), false); } catch (e) { /* ignore */ }
+    }
+}
 
 function updateScenarioVideo() {
     const tile = document.getElementById('videoTile');
@@ -208,10 +308,19 @@ function isSquareAttacked(square) {
 }
 
 function onDragStart(source, piece) {
+    dragStartedOnTurn = null;
+    lastDragSource = source;
+    dragStartedAtMs = pmdbgNowMs();
+
     // Only allow dragging white pieces
     if (game.game_over()) return false;
     if (whiteTime <= 0 || blackTime <= 0) return false;
     if (piece.search(/^b/) !== -1) return false;
+
+    dragStartedOnTurn = (() => {
+        try { return game.turn(); } catch (e) { return null; }
+    })();
+    pmdbgLog('drag_start', { source, piece, dragStartedOnTurn });
 
     // During black's turn, check if we're dragging from a premoved position
     if (game.turn() === 'b') {
@@ -224,12 +333,28 @@ function onDragStart(source, piece) {
 }
 
 function onDrop(source, target) {
+    const currentTurn = (() => {
+        try { return game.turn(); } catch (e) { return '?'; }
+    })();
+
     // Dropped outside the board (or otherwise invalid target)
     if (!target || target === 'offboard') return 'snapback';
     if (source === target) return 'snapback';
 
-    // If it's black's turn, this is a pre-move
-    if (game.turn() === 'b') {
+    // If you started dragging during Black's turn, keep treating this as a premove,
+    // even if Black moved mid-drag and the turn flipped to White before drop.
+    const treatAsPremove = (dragStartedOnTurn === 'b') || (currentTurn === 'b');
+    pmdbgLog('drop', {
+        source,
+        target,
+        dragStartedOnTurn,
+        currentTurn,
+        treatAsPremove,
+        dragHeldMs: Math.round(pmdbgNowMs() - (dragStartedAtMs || pmdbgNowMs()))
+    });
+
+    // If it's (effectively) black's turn, this is a pre-move
+    if (treatAsPremove) {
         // Validate against the *visual* board state (includes previously queued premoves)
         const currentPos = board.position();
         const pieceAtSource = currentPos[source]; // e.g. 'wQ', 'wK'
@@ -238,18 +363,26 @@ function onDrop(source, target) {
         // Store the pre-move
         premoves.push({ from: source, to: target });
 
+        pmdbgLog('premove_queued', { from: source, to: target, queued: premoves.slice(-5) });
+
         renderPremoveHighlights();
 
         // Keep the piece rendered at the last premoved-to square
         updatePremovePreview();
+
+        // If the turn already flipped to white (black moved while we were dragging),
+        // execute the premove immediately rather than waiting for a black-move callback.
+        if (currentTurn === 'w' && !game.game_over()) {
+            pmdbgLog('premove_drop_turn_flipped_to_white_execute_now');
+            scheduleAutoPremoveExecution(0);
+        }
 
         // Keep piece at target by not returning 'snapback'
         return;
     }
 
     // Clear any existing pre-moves and highlights
-    premoves = [];
-    removeHighlights();
+    clearPremoves('real_move_attempt', { removeHighlights: true, snapBoard: false });
 
     // Try to make the move
     let move = null;
@@ -260,11 +393,17 @@ function onDrop(source, target) {
             promotion: 'q' // always promote to queen
         });
     } catch (e) {
+        pmdbgWarn('real_move_threw', { source, target, error: String(e && (e.message || e)) });
         return 'snapback';
     }
 
     // Illegal move
-    if (move === null) return 'snapback';
+    if (move === null) {
+        pmdbgLog('real_move_illegal', { source, target });
+        return 'snapback';
+    }
+
+    pmdbgLog('real_move_played', { san: move && move.san, from: move && move.from, to: move && move.to });
 
     moveHistory.push(move);
     updateStatus();
@@ -343,8 +482,10 @@ function scheduleBlackMove() {
         blackMoveTimeout = null;
     }
     updateTimerDisplay();
+    pmdbgLog('black_move_scheduled', { delaySeconds: blackMoveDelay });
     blackMoveTimeout = setTimeout(() => {
         blackMoveTimeout = null;
+        pmdbgLog('black_move_timeout_fired');
         makeBlackMove();
     }, blackMoveDelay * 1000);
 }
@@ -385,26 +526,6 @@ function fenToPosition(fen) {
     return position;
 }
 
-function positionWithVisualWhitesOverlaid(fen) {
-    // Base: real game position after black move
-    const base = fenToPosition(fen);
-
-    // Remove all white pieces from base
-    for (const sq of Object.keys(base)) {
-        if (base[sq] && base[sq][0] === 'w') delete base[sq];
-    }
-
-    // Overlay current visual white pieces (includes queued premoves)
-    const visual = board.position();
-    for (const sq of Object.keys(visual)) {
-        if (visual[sq] && visual[sq][0] === 'w') {
-            base[sq] = visual[sq];
-        }
-    }
-
-    return base;
-}
-
 function makeBlackMove() {
     // Get all possible moves for black
     const possibleMoves = game.moves();
@@ -414,7 +535,10 @@ function makeBlackMove() {
 
     // Pick a random move
     const randomIdx = Math.floor(Math.random() * possibleMoves.length);
+    pmdbgLog('black_move_about_to_play', { candidateCount: possibleMoves.length, chosenIndex: randomIdx });
     const move = game.move(possibleMoves[randomIdx]);
+
+    pmdbgLog('black_move_played', { san: move && move.san, from: move && move.from, to: move && move.to });
 
     moveHistory.push(move);
 
@@ -426,23 +550,60 @@ function makeBlackMove() {
 
     // If a premove is queued, execute exactly ONE (white move), then black will respond again.
     if (premoves.length > 0 && !game.game_over()) {
-        setTimeout(() => executeNextPremove(), 80);
+        pmdbgLog('auto_premove_will_schedule', { delayMs: 80, premovesLen: premoves.length });
+        scheduleAutoPremoveExecution(80);
     }
 }
 
-function executeNextPremove() {
-    if (premoves.length === 0) return;
-    if (game.game_over()) {
-        premoves = [];
-        renderPremoveHighlights();
-        return;
+function scheduleAutoPremoveExecution(delayMs) {
+    if (premoveAutoTimeout) {
+        clearTimeout(premoveAutoTimeout);
+        premoveAutoTimeout = null;
     }
+    premoveAutoPending = true;
+    pmdbgLog('auto_premove_scheduled', { delayMs });
+    premoveAutoTimeout = setTimeout(() => {
+        premoveAutoTimeout = null;
+        premoveAutoPending = false;
+        pmdbgLog('auto_premove_timeout_fired');
+        executeNextPremove();
+    }, Math.max(0, Number(delayMs) || 0));
+}
 
-    // Only execute premoves when it's actually white's turn
-    if (game.turn() !== 'w') return;
+function executeNextPremove() {
+    try {
+        // If called directly, ensure pending state is cleared.
+        premoveAutoPending = false;
+        if (premoveAutoTimeout) {
+            clearTimeout(premoveAutoTimeout);
+            premoveAutoTimeout = null;
+        }
+
+        pmdbgLog('auto_premove_execute_enter');
+
+        if (premoves.length === 0) {
+            pmdbgLog('auto_premove_execute_abort_no_premoves');
+            return;
+        }
+        if (game.game_over()) {
+            clearPremoves('auto_premove_abort_game_over', { removeHighlights: true, snapBoard: true });
+            pmdbgLog('auto_premove_execute_aborted_game_over');
+            return;
+        }
+
+        // Only execute premoves when it's actually white's turn
+        if (game.turn() !== 'w') {
+            pmdbgLog('auto_premove_execute_abort_not_white_turn');
+            return;
+        }
 
     const pm = premoves.shift();
-    renderPremoveHighlights();
+    pmdbgLog('auto_premove_about_to_play', { from: pm && pm.from, to: pm && pm.to, remainingAfterShift: premoves.length });
+    try {
+        renderPremoveHighlights();
+    } catch (e) {
+        pmdbgWarn('auto_premove_render_highlights_failed', { error: String(e && (e.message || e)) });
+    }
 
     const move = game.move({
         from: pm.from,
@@ -452,13 +613,13 @@ function executeNextPremove() {
 
     // If illegal after black's move, clear remaining premoves and snap to the legal game state
     if (move === null) {
-        premoves = [];
-        renderPremoveHighlights();
-        // Snap instantly (no animation) on failed premove cleanup
-        board.position(game.fen(), false);
+        clearPremoves('auto_premove_illegal', { removeHighlights: true, snapBoard: true });
         updateTimerDisplay();
+        pmdbgWarn('auto_premove_illegal_cleared_queue', { from: pm.from, to: pm.to });
         return;
     }
+
+    pmdbgLog('auto_premove_played', { san: move && move.san, from: move && move.from, to: move && move.to, remainingQueue: premoves.length });
 
     // Consume 0.1s from white's clock when the premove EXECUTES
     whiteTime = Math.max(0, whiteTime - 0.1);
@@ -473,6 +634,13 @@ function executeNextPremove() {
     if (!game.game_over() && whiteTime > 0) {
         scheduleBlackMove();
     }
+    } catch (e) {
+        pmdbgWarn('auto_premove_execute_threw', { error: String(e && (e.message || e)) });
+        // If anything goes wrong mid-execution, clear premoves and snap to real state
+        clearPremoves('auto_premove_execute_exception', { removeHighlights: true, snapBoard: true });
+        updateTimerDisplay();
+        updateStatus();
+    }
 }
 
 function updateStatus() {
@@ -486,7 +654,8 @@ function updateStatus() {
         status = 'Draw';
     } else {
         if (game.in_check()) {
-            status = '<span class="check">Black king is in check!</span>';
+            const sideInCheck = game.turn() === 'w' ? 'White' : 'Black';
+            status = `<span class="check">${sideInCheck} king is in check!</span>`;
         } else {
             status = 'Continue moving to checkmate black!';
         }
@@ -509,6 +678,8 @@ function updateTimerDisplay() {
         whiteTimerEl.classList.add('timeout');
     } else if (blackTime <= 0) {
         blackTimerEl.classList.add('timeout');
+    } else if (premoveAutoPending && game.turn() === 'w') {
+        // A premove is about to auto-execute; don't visually imply the user is "thinking".
     } else if (game.turn() === 'w') {
         whiteTimerEl.classList.add('active');
     } else {
@@ -520,12 +691,59 @@ function startTimer() {
     if (timerInterval) clearInterval(timerInterval);
 
     timerInterval = setInterval(() => {
+        // Debug: log turn / FEN transitions without spamming every tick.
+        if (pmdbgEnabled()) {
+            let currentTurn = null;
+            let currentFen = null;
+            try { currentTurn = game.turn(); } catch (e) { currentTurn = '?'; }
+            try { currentFen = game.fen(); } catch (e) { currentFen = ''; }
+            if (pmdbgLastTurn !== currentTurn) {
+                pmdbgLog('timer_tick_turn_changed', { fromTurn: pmdbgLastTurn, toTurn: currentTurn });
+                pmdbgLastTurn = currentTurn;
+            }
+            if (pmdbgLastFen !== currentFen && currentFen) {
+                // Only log FEN changes when they occur (moves/loads)
+                pmdbgLog('timer_tick_fen_changed');
+                pmdbgLastFen = currentFen;
+            }
+        }
+
         if (game.game_over()) {
             clearInterval(timerInterval);
             return;
         }
 
         if (game.turn() === 'w') {
+            // If premoves exist and it is White to move, treat them as an auto-move:
+            // never drain White's clock while the queue is pending execution.
+            // Also "self-heal": if for any reason the scheduled timeout path fails,
+            // try to execute a premove right from the timer tick.
+            if (premoves.length > 0) {
+                pmdbgLog('timer_tick_skip_white_due_to_premoves_queued', {
+                    premoveAutoPending,
+                    queuedPreview: premoves.slice(0, 5)
+                });
+
+                // If we're not currently waiting on the scheduled auto-execution, try to execute now.
+                if (!premoveAutoPending) {
+                    const now = pmdbgNowMs();
+                    if (now - pmdbgLastSuspiciousLogAt > 600) {
+                        pmdbgLastSuspiciousLogAt = now;
+                        pmdbgWarn('timer_tick_white_has_premoves_but_not_pending', {
+                            queuedPreview: premoves.slice(0, 5)
+                        });
+                    }
+                    try {
+                        executeNextPremove();
+                    } catch (e) {
+                        pmdbgWarn('timer_tick_executeNextPremove_threw', { error: String(e && (e.message || e)) });
+                    }
+                }
+
+                updateTimerDisplay();
+                return;
+            }
+
             whiteTime -= 0.1;
             if (whiteTime <= 0) {
                 whiteTime = 0;
@@ -551,8 +769,7 @@ function resetBoard() {
         clearTimeout(blackMoveTimeout);
         blackMoveTimeout = null;
     }
-    premoves = [];
-    removeHighlights();
+    clearPremoves('resetBoard', { removeHighlights: true, snapBoard: false });
     moveHistory = [];
 
     // Apply configured starting times
@@ -574,22 +791,6 @@ function resetBoard() {
     // If the scenario starts with black to move, kick off black's move loop.
     if (!game.game_over() && game.turn() === 'b' && blackTime > 0) {
         scheduleBlackMove();
-    }
-}
-
-function undoMove() {
-    if (moveHistory.length > 0) {
-        if (blackMoveTimeout) {
-            clearTimeout(blackMoveTimeout);
-            blackMoveTimeout = null;
-        }
-        premoves = [];
-        removeHighlights();
-        game.undo();
-        moveHistory.pop();
-        board.position(game.fen());
-        updateStatus();
-        updateTimerDisplay();
     }
 }
 
