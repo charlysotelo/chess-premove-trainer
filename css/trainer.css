@@ -39,6 +39,18 @@ h1 {
     border: 0;
 }
 
+.video-title {
+    font-size: 14px;
+    font-weight: bold;
+    color: #333;
+    background-color: white;
+    padding: 8px 10px;
+    border-radius: 5px;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    margin-bottom: 10px;
+    text-align: center;
+}
+
 @media (max-width: 1100px) {
     .board-and-video {
         flex-direction: column;
@@ -164,5 +176,31 @@ button:hover {
 
 .square-premove-dest-highlight {
     box-shadow: inset 0 0 3px 3px rgba(244, 67, 54, 0.9);
+}
+
+.donate-footer {
+    margin-top: 18px;
+    margin-bottom: 10px;
+    background-color: white;
+    padding: 10px 14px;
+    border-radius: 5px;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    opacity: 0.95;
+}
+
+.donate-title {
+    font-size: 13px;
+    color: #333;
+}
+
+.donate-qr {
+    width: 320px;
+    max-width: 90vw;
+    height: auto;
+    image-rendering: auto;
 }
 
