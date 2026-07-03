@@ -632,6 +632,29 @@ function initTrainer() {
         if (premoves.length > 0) renderPremoveHighlights();
     });
 
+    // Maximize/minimize the board (persisted across reloads).
+    const boardSizeBtn = document.getElementById('boardSizeBtn');
+    if (boardSizeBtn) {
+        const applyBoardSize = function (maximized) {
+            document.body.classList.toggle('board-max', maximized);
+            boardSizeBtn.textContent = maximized ? '⛶ Minimize board' : '⛶ Maximize board';
+            board.resize();
+            syncBoardDisplay(false);
+            if (premoves.length > 0) renderPremoveHighlights();
+        };
+
+        boardSizeBtn.addEventListener('click', function () {
+            const maximized = !document.body.classList.contains('board-max');
+            try { localStorage.setItem('premoveTrainerBoardMax', maximized ? '1' : '0'); } catch (e) { /* ignore */ }
+            pmdbgLog('board_size_toggled', { maximized });
+            applyBoardSize(maximized);
+        });
+
+        let startMaximized = false;
+        try { startMaximized = localStorage.getItem('premoveTrainerBoardMax') === '1'; } catch (e) { /* ignore */ }
+        if (startMaximized) applyBoardSize(true);
+    }
+
     const slider = document.getElementById('blackDelay');
     const valueDisplay = document.getElementById('blackDelayValue');
 
