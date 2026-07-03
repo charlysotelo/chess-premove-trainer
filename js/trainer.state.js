@@ -18,5 +18,7 @@ let premoveAutoPending = false;
 let premoveAutoTimeout = null;
 let dragStartedOnTurn = null;
 let dragStartedAtMs = 0;
+let isDragging = false;
+let boardSyncPending = false;
 let resultRecorded = false;
 let stats = { wins: 0, losses: 0, draws: 0, bestRemaining: null };

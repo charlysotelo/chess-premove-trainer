@@ -25,7 +25,28 @@ function clearPremoves(reason, options) {
     }
 
     if (opts.snapBoard !== false && board) {
-        try { board.position(game.fen(), false); } catch (e) { /* ignore */ }
+        try { syncBoardDisplay(false); } catch (e) { /* ignore */ }
+    }
+}
+
+// Single choke point for pushing the real/preview position to the visual
+// board. Calling board.position() while a drag (or its snap animation) is in
+// flight makes chessboard.js double-draw the dragged piece — the "ghost
+// piece" bug — so mid-drag syncs are deferred until onSnapEnd/onSnapbackEnd.
+function syncBoardDisplay(animate) {
+    if (!board) return;
+
+    if (isDragging) {
+        boardSyncPending = true;
+        pmdbgLog('board_sync_deferred_while_dragging');
+        return;
+    }
+
+    boardSyncPending = false;
+    if (premoves.length > 0) {
+        updatePremovePreview();
+    } else {
+        board.position(game.fen(), animate === true);
     }
 }
 
@@ -41,6 +62,11 @@ function onDragStart(source, piece) {
     dragStartedOnTurn = (() => {
         try { return game.turn(); } catch (e) { return null; }
     })();
+
+    // Only mark the drag as live once we know we're allowing it — a refused
+    // drag never fires onDrop/onSnapEnd, which would leave the flag stuck
+    // and every board sync deferred forever.
+    isDragging = true;
     pmdbgLog('drag_start', { source, piece, dragStartedOnTurn });
 
     return true;
@@ -72,8 +98,10 @@ function onDrop(source, target) {
         premoves.push({ from: source, to: target });
         pmdbgLog('premove_queued', { from: source, to: target, queued: premoves.slice(-5) });
 
+        // Highlights only — the preview render happens in onSnapEnd, after
+        // the drop's snap animation. Redrawing the board synchronously here
+        // races that animation and can double-draw the dropped piece.
         renderPremoveHighlights();
-        updatePremovePreview();
 
         if (currentTurn === 'w' && !game.game_over()) {
             pmdbgLog('premove_drop_turn_flipped_to_white_execute_now');
@@ -114,13 +142,18 @@ function onDrop(source, target) {
 }
 
 function onSnapEnd() {
-    // If premoves are queued (whichever side is to move), keep showing the
-    // preview — snapping to game.fen() here would visually erase it.
-    if (premoves.length > 0) {
-        updatePremovePreview();
-        return;
+    isDragging = false;
+    // Shows the premove preview if any moves are queued, otherwise the real
+    // position — and flushes any sync that was deferred mid-drag.
+    syncBoardDisplay(false);
+}
+
+function onSnapbackEnd() {
+    isDragging = false;
+    if (boardSyncPending) {
+        pmdbgLog('board_sync_flushed_after_snapback');
+        syncBoardDisplay(false);
     }
-    board.position(game.fen());
 }
 
 function scheduleBlackMove() {
@@ -149,8 +182,7 @@ function makeBlackMove() {
 
     moveHistory.push(move);
 
-    if (premoves.length > 0) updatePremovePreview();
-    else board.position(game.fen());
+    syncBoardDisplay(true);
 
     updateTimerDisplay();
     updateStatus();
@@ -228,8 +260,7 @@ function executeNextPremove() {
         whiteTime = Math.max(0, whiteTime - 0.1);
         moveHistory.push(move);
 
-        if (premoves.length > 0) updatePremovePreview();
-        else board.position(game.fen(), false);
+        syncBoardDisplay(false);
 
         updateStatus();
         updateTimerDisplay();
@@ -447,13 +478,13 @@ function resetBoard() {
 
     const ok = setupScenarioPosition();
     if (ok === false) {
-        board.position(game.fen());
+        syncBoardDisplay(false);
         updateTimerDisplay();
         document.getElementById('status').innerHTML = 'Custom Scenario: paste a FEN and click Load.';
         return;
     }
 
-    board.position(game.fen());
+    syncBoardDisplay(false);
     updateTimerDisplay();
     updateStatus();
     startTimer();
@@ -540,6 +571,7 @@ function initTrainer() {
         onDragStart: onDragStart,
         onDrop: onDrop,
         onSnapEnd: onSnapEnd,
+        onSnapbackEnd: onSnapbackEnd,
         pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{piece}.png'
     };
 
@@ -552,15 +584,35 @@ function initTrainer() {
     if (resetStatsBtn) resetStatsBtn.addEventListener('click', resetStats);
 
     // Right-click on the board cancels all queued premoves (lichess-style).
+    // The handler lives on document, not #board: chessboard.js appends the
+    // piece being dragged to <body>, so a right-click landing on it would
+    // never bubble through #board and the browser menu would open.
+    document.addEventListener('contextmenu', function (e) {
+        const t = e.target;
+        const onBoard = t && t.closest && t.closest('#board');
+        const onDraggedPiece = t && t.classList && t.classList.contains('piece-417db');
+        if (!onBoard && !onDraggedPiece) return;
+
+        e.preventDefault();
+        if (premoves.length > 0) {
+            clearPremoves('user_right_click', { removeHighlights: true, snapBoard: true });
+            updateTimerDisplay();
+        }
+    });
+
+    // chessboard.js starts a drag on any mousedown, including right-button —
+    // which pairs with the context menu to leave a phantom drag behind.
+    // Swallow right/middle-button presses before they reach its handlers
+    // (capture phase runs before the descendants' delegated listeners).
     const boardEl = document.getElementById('board');
     if (boardEl) {
-        boardEl.addEventListener('contextmenu', function (e) {
-            e.preventDefault();
-            if (premoves.length > 0) {
-                clearPremoves('user_right_click', { removeHighlights: true, snapBoard: true });
-                updateTimerDisplay();
+        boardEl.addEventListener('mousedown', function (e) {
+            if (e.button !== 0) {
+                pmdbgLog('non_left_mousedown_blocked', { button: e.button });
+                e.preventDefault();
+                e.stopPropagation();
             }
-        });
+        }, true);
     }
 
     // Keyboard shortcut: N = new position (ignored while typing in inputs).
@@ -576,12 +628,8 @@ function initTrainer() {
     window.addEventListener('resize', function () {
         if (!board) return;
         board.resize();
-        if (premoves.length > 0) {
-            updatePremovePreview();
-            renderPremoveHighlights();
-        } else {
-            board.position(game.fen(), false);
-        }
+        syncBoardDisplay(false);
+        if (premoves.length > 0) renderPremoveHighlights();
     });
 
     const slider = document.getElementById('blackDelay');

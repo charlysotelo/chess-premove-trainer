@@ -68,10 +68,32 @@ White mid-drag), it re-renders the premove preview instead — snapping back to
 the raw game position would visually erase the queue.
 
 ### Cancelling premoves
-Right-clicking the board (a `contextmenu` listener on `#board`, wired in
-`initTrainer()`) clears the whole queue via
+Right-clicking the board clears the whole queue via
 `clearPremoves('user_right_click', ...)` — same UX as lichess/chess.com.
 A real-time move on White's turn also clears the queue, as before.
+
+Two quirks make the wiring non-obvious (both in `initTrainer()`):
+- The `contextmenu` listener is on `document`, not `#board`, because
+  chessboard.js appends the actively-dragged piece to `<body>` — a
+  right-click landing on it never bubbles through `#board`. The handler
+  matches `e.target.closest('#board')` or the dragged-piece class
+  (`piece-417db`).
+- A capture-phase `mousedown` listener on `#board` swallows non-left-button
+  presses before chessboard.js sees them: chessboard.js starts a drag on
+  *any* mouse button, so an unsuppressed right-click would start a phantom
+  drag alongside the context menu.
+
+### Board rendering vs. drags: `syncBoardDisplay()`
+All mid-game repaints of the visual board go through
+`syncBoardDisplay(animate)` (never `board.position()` directly): it renders
+the premove preview when the queue is non-empty, the real `game.fen()`
+otherwise. Crucially, if a drag is in flight (`isDragging`, set in
+`onDragStart` only once the drag is accepted, cleared in
+`onSnapEnd`/`onSnapbackEnd`), the sync is *deferred* (`boardSyncPending`) and
+flushed when the drag settles. Calling `board.position()` while chessboard.js
+is mid-drag or mid-snap-animation double-draws the moving piece — the
+"ghost/teleporting piece" bug. For the same reason, `onDrop`'s premove branch
+only renders highlights; the preview render waits for `onSnapEnd`.
 
 ## Timers and move scheduling
 
