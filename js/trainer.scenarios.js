@@ -33,8 +33,6 @@ function generateRandomPosition() {
     );
     game.put({ type: 'k', color: 'b' }, bkPos);
 
-    // Set white to move
-    game.load(game.fen().replace(' w ', ' w '));
     moveHistory = [];
     premoves = [];
 }
@@ -69,17 +67,7 @@ function setupResetMatePosition() {
 
         // Build a temp position to verify legality and that black is not in check
         const temp = new Chess();
-        temp.clear();
-        const b = game.board();
-        for (let r = 0; r < 8; r++) {
-            for (let f = 0; f < 8; f++) {
-                const p = b[r][f];
-                if (!p) continue;
-                const file = 'abcdefgh'[f];
-                const rank = String(8 - r);
-                temp.put(p, file + rank);
-            }
-        }
+        if (!temp.load(game.fen())) continue;
         temp.put({ type: 'k', color: 'b' }, candidate);
 
         // Switch to black-to-move to check if black is in check
@@ -97,8 +85,6 @@ function setupResetMatePosition() {
     if (!bkPos) bkPos = 'b7';
     game.put({ type: 'k', color: 'b' }, bkPos);
 
-    // White to move
-    game.load(game.fen().replace(' w ', ' w '));
     moveHistory = [];
     premoves = [];
 }
@@ -143,25 +129,9 @@ function areAdjacent(sq1, sq2) {
 }
 
 function isSquareAttacked(square) {
-    // Temporarily switch turn to check if square is attacked
-    const originalTurn = game.turn();
-    const fen = game.fen();
-    const newFen = fen.replace(/ [wb] /, originalTurn === 'w' ? ' b ' : ' w ');
-    game.load(newFen);
-
-    const attacked = game.moves({ square: square, verbose: true }).length === 0 &&
-        game.in_check();
-
-    game.load(fen);
-
-    // Simple check: see if any white piece attacks this square
-    const moves = game.moves({ verbose: true });
-    for (let move of moves) {
-        if (move.to === square) {
-            return true;
-        }
-    }
-    return false;
+    // True if any piece of the side to move (white during setup) can move to
+    // this square. Good enough for placement checks on a sparse board.
+    return game.moves({ verbose: true }).some(move => move.to === square);
 }
 
 function fenToPosition(fen) {

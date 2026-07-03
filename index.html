@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Practice chess premoves: queue moves during Black's turn and finish the mate before your clock runs out.">
     <title>Premove trainer</title>
     
     <!-- Chessboard.js CSS -->
@@ -15,7 +16,7 @@
 
     <div class="controls">
         <label for="scenarioSelect">Scenario:</label>
-        <select id="scenarioSelect" style="flex: 1; padding: 8px; font-size: 16px;">
+        <select id="scenarioSelect">
             <option value="kq">K+Q vs K (Random)</option>
             <option value="resetMate">Reset Mate (Random)</option>
             <option value="customFen">Custom Scenario (FEN)</option>
@@ -24,10 +25,10 @@
 
     <div class="controls" id="customScenarioControls" style="display: none;">
         <label for="customFen">FEN:</label>
-        <input type="text" id="customFen" placeholder="Paste a FEN (e.g. '8/8/8/8/8/8/8/8 w - - 0 1')" style="flex: 1; padding: 8px; font-size: 16px;">
+        <input type="text" id="customFen" placeholder="Paste a FEN (e.g. '8/8/8/8/8/8/8/8 w - - 0 1')">
         <button id="loadFenBtn" type="button">Load</button>
     </div>
-    <div id="customFenError" style="color: #f44336; margin-top: 6px; max-width: 500px; display: none;"></div>
+    <div id="customFenError" style="display: none;"></div>
 
     <div class="controls">
         <label for="whiteTime">White time:</label>
@@ -52,6 +53,11 @@
         <div class="timer" id="blackTimer">Black: 60.0s</div>
     </div>
 
+    <div class="stats">
+        <span id="statsLine">Wins: 0 · Losses: 0 · Draws: 0</span>
+        <button id="resetStatsBtn" type="button" class="linklike">reset</button>
+    </div>
+
     <div class="board-and-video">
         <div id="board"></div>
 
@@ -72,9 +78,15 @@
     </div>
 
     <div id="status">Move the white pieces to checkmate black!</div>
-    
+
     <div>
         <button id="newPositionBtn">New Position</button>
+    </div>
+
+    <div class="info">
+        <b>How to premove:</b> drag pieces while it's Black's turn to queue moves — they
+        fire automatically the instant it's your turn again. You can chain several in a row.
+        <b>Right-click the board</b> to cancel queued premoves. Press <kbd>N</kbd> for a new position.
     </div>
 
     <footer class="donate-footer" aria-label="Buy me a coffee">

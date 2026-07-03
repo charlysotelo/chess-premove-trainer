@@ -63,9 +63,15 @@ Black's reply via `scheduleBlackMove()`.
 
 ### `onSnapEnd()`
 Normally snaps the board back to `game.fen()` after a drag animation. But if
-it's currently Black's turn *and* premoves are queued, it deliberately does
-**nothing** — snapping back here would visually erase the premove preview
-that `updatePremovePreview()` just drew.
+premoves are queued (regardless of whose turn it is — the turn can flip to
+White mid-drag), it re-renders the premove preview instead — snapping back to
+the raw game position would visually erase the queue.
+
+### Cancelling premoves
+Right-clicking the board (a `contextmenu` listener on `#board`, wired in
+`initTrainer()`) clears the whole queue via
+`clearPremoves('user_right_click', ...)` — same UX as lichess/chess.com.
+A real-time move on White's turn also clears the queue, as before.
 
 ## Timers and move scheduling
 
@@ -98,6 +104,24 @@ that `updatePremovePreview()` just drew.
   latency. The whole function is wrapped in try/catch that clears premoves
   and re-renders on any unexpected exception, since a stuck/throwing state
   machine here would freeze the game.
+- `endGameByTimeout(side, options)` is the single choke point for a clock
+  hitting zero: it stops the tick interval, cancels any pending
+  `blackMoveTimeout` (without this, a scheduled Black move could fire *after*
+  time ran out and keep the game going), wipes the premove queue, sets the
+  status verdict, and records the result. The verdict for a White flag is
+  material-aware via `blackHasMatingMaterial()` — a lone Black king (or king
+  + single minor) makes it a draw; otherwise White loses on time. This
+  matters for Custom FEN scenarios where Black has real material.
+  `executeNextPremove()` also routes through it when the 0.1s-per-premove
+  execution cost drains White's clock mid-queue, which previously froze the
+  game silently. `applyTimeSetting` passes `{ record: false }` so ending a
+  game by dragging a time slider to 0 doesn't pollute the stats.
+- Results are recorded once per game (`resultRecorded`, reset in
+  `resetBoard()`): `maybeRecordGameEnd()` runs after every real move, Black
+  move, and premove execution; `recordGameEnd(kind)` updates the win/loss/draw
+  counters plus best-mate-time, persists them to
+  `localStorage['premoveTrainerStats']`, and re-renders the `#statsLine`
+  display via `renderStats()` in `trainer.ui.js`.
 - `clearPremoves(reason, options)` is the single choke point for wiping the
   queue — it also cancels any pending auto-execution timeout so a stale
   `setTimeout` can never fire against an empty/changed queue. `reason` is

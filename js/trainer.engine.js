@@ -31,7 +31,6 @@ function clearPremoves(reason, options) {
 
 function onDragStart(source, piece) {
     dragStartedOnTurn = null;
-    lastDragSource = source;
     dragStartedAtMs = pmdbgNowMs();
 
     // Only allow dragging white pieces
@@ -43,11 +42,6 @@ function onDragStart(source, piece) {
         try { return game.turn(); } catch (e) { return null; }
     })();
     pmdbgLog('drag_start', { source, piece, dragStartedOnTurn });
-
-    // During black's turn, check if we're dragging from a premoved position
-    if (game.turn() === 'b') {
-        return true;
-    }
 
     return true;
 }
@@ -112,6 +106,7 @@ function onDrop(source, target) {
 
     moveHistory.push(move);
     updateStatus();
+    maybeRecordGameEnd();
 
     if (!game.game_over()) {
         scheduleBlackMove();
@@ -119,7 +114,10 @@ function onDrop(source, target) {
 }
 
 function onSnapEnd() {
-    if (game.turn() === 'b' && premoves.length > 0) {
+    // If premoves are queued (whichever side is to move), keep showing the
+    // preview — snapping to game.fen() here would visually erase it.
+    if (premoves.length > 0) {
+        updatePremovePreview();
         return;
     }
     board.position(game.fen());
@@ -156,6 +154,7 @@ function makeBlackMove() {
 
     updateTimerDisplay();
     updateStatus();
+    maybeRecordGameEnd();
 
     if (premoves.length > 0 && !game.game_over()) {
         pmdbgLog('auto_premove_will_schedule', { delayMs: 80, premovesLen: premoves.length });
@@ -234,9 +233,16 @@ function executeNextPremove() {
 
         updateStatus();
         updateTimerDisplay();
+        maybeRecordGameEnd();
 
-        if (!game.game_over() && whiteTime > 0) {
-            scheduleBlackMove();
+        if (!game.game_over()) {
+            if (whiteTime > 0) {
+                scheduleBlackMove();
+            } else {
+                // The 0.1s execution cost drained white's clock mid-queue —
+                // declare the flag instead of silently freezing the game.
+                endGameByTimeout('w');
+            }
         }
     } catch (e) {
         pmdbgWarn('auto_premove_execute_threw', { error: String(e && (e.message || e)) });
@@ -267,6 +273,7 @@ function startTimer() {
 
         if (game.game_over()) {
             clearInterval(timerInterval);
+            timerInterval = null;
             return;
         }
 
@@ -299,20 +306,130 @@ function startTimer() {
             whiteTime -= 0.1;
             if (whiteTime <= 0) {
                 whiteTime = 0;
-                clearInterval(timerInterval);
-                document.getElementById('status').innerHTML = '<span style="color: orange; font-weight: bold;">Time out! Draw - Black has insufficient material.</span>';
+                endGameByTimeout('w');
+                return;
             }
         } else {
             blackTime -= 0.1;
             if (blackTime <= 0) {
                 blackTime = 0;
-                clearInterval(timerInterval);
-                document.getElementById('status').innerHTML = '<span class="success">Black ran out of time! White wins!</span>';
+                endGameByTimeout('b');
+                return;
             }
         }
 
         updateTimerDisplay();
     }, 100);
+}
+
+// True if black has enough material left to deliver mate (FIDE-style flag
+// rules, simplified): a lone king, or king + single minor piece, cannot win.
+function blackHasMatingMaterial() {
+    const extras = [];
+    for (const row of game.board()) {
+        for (const p of row) {
+            if (p && p.color === 'b' && p.type !== 'k') extras.push(p.type);
+        }
+    }
+    if (extras.length === 0) return false;
+    if (extras.length === 1 && (extras[0] === 'n' || extras[0] === 'b')) return false;
+    return true;
+}
+
+// Single choke point for a clock hitting zero: stops the tick loop, cancels
+// any pending black move, wipes the premove queue, and reports the verdict.
+// Without this, a pending blackMoveTimeout could keep the game going after
+// time ran out.
+function endGameByTimeout(side, options) {
+    const opts = options || {};
+
+    if (timerInterval) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+    }
+    if (blackMoveTimeout) {
+        clearTimeout(blackMoveTimeout);
+        blackMoveTimeout = null;
+    }
+    clearPremoves('timeout_' + side, { removeHighlights: true, snapBoard: true });
+
+    pmdbgLog('game_ended_by_timeout', { side });
+
+    if (side === 'w') {
+        if (blackHasMatingMaterial()) {
+            document.getElementById('status').innerHTML = '<span class="fail">Time out! White loses on time.</span>';
+            if (opts.record !== false) recordGameEnd('loss');
+        } else {
+            document.getElementById('status').innerHTML = '<span class="warn">Time out! Draw — Black has insufficient material.</span>';
+            if (opts.record !== false) recordGameEnd('draw');
+        }
+    } else {
+        document.getElementById('status').innerHTML = '<span class="success">Black ran out of time! White wins!</span>';
+        if (opts.record !== false) recordGameEnd('win');
+    }
+
+    updateTimerDisplay();
+}
+
+function maybeRecordGameEnd() {
+    if (resultRecorded || !game.game_over()) return;
+    if (game.in_checkmate()) {
+        // game.turn() is the side that got mated.
+        recordGameEnd(game.turn() === 'b' ? 'mate' : 'loss');
+    } else {
+        recordGameEnd('draw');
+    }
+}
+
+function recordGameEnd(kind) {
+    if (resultRecorded) return;
+    resultRecorded = true;
+
+    if (kind === 'mate') {
+        stats.wins += 1;
+        if (stats.bestRemaining === null || whiteTime > stats.bestRemaining) {
+            stats.bestRemaining = Math.round(whiteTime * 10) / 10;
+        }
+    } else if (kind === 'win') {
+        stats.wins += 1;
+    } else if (kind === 'loss') {
+        stats.losses += 1;
+    } else {
+        stats.draws += 1;
+    }
+
+    pmdbgLog('game_result_recorded', { kind, stats: { ...stats } });
+    saveStats();
+    renderStats();
+}
+
+function loadStats() {
+    try {
+        const raw = localStorage.getItem('premoveTrainerStats');
+        if (raw) {
+            const s = JSON.parse(raw);
+            return {
+                wins: Number(s.wins) || 0,
+                losses: Number(s.losses) || 0,
+                draws: Number(s.draws) || 0,
+                bestRemaining: typeof s.bestRemaining === 'number' ? s.bestRemaining : null
+            };
+        }
+    } catch (e) { /* ignore */ }
+    return { wins: 0, losses: 0, draws: 0, bestRemaining: null };
+}
+
+function saveStats() {
+    try {
+        localStorage.setItem('premoveTrainerStats', JSON.stringify(stats));
+    } catch (e) { /* ignore */ }
+}
+
+function resetStats() {
+    stats = { wins: 0, losses: 0, draws: 0, bestRemaining: null };
+    saveStats();
+    renderStats();
+    pmdbgLog('stats_reset');
 }
 
 function resetBoard() {
@@ -323,6 +440,7 @@ function resetBoard() {
     }
     clearPremoves('resetBoard', { removeHighlights: true, snapBoard: false });
     moveHistory = [];
+    resultRecorded = false;
 
     whiteTime = Math.max(0, Number(initialWhiteTime) || 0);
     blackTime = Math.max(0, Number(initialBlackTime) || 0);
@@ -356,13 +474,9 @@ function applyTimeSetting(side, seconds) {
     }
 
     if (timerInterval && (whiteTime <= 0 || blackTime <= 0)) {
-        clearInterval(timerInterval);
-        timerInterval = null;
-        if (whiteTime <= 0) {
-            document.getElementById('status').innerHTML = '<span style="color: orange; font-weight: bold;">Time out! Draw - Black has insufficient material.</span>';
-        } else if (blackTime <= 0) {
-            document.getElementById('status').innerHTML = '<span class="success">Black ran out of time! White wins!</span>';
-        }
+        // Ended via a slider, not real play — don't count it in the stats.
+        endGameByTimeout(whiteTime <= 0 ? 'w' : 'b', { record: false });
+        return;
     }
 
     updateTimerDisplay();
@@ -430,6 +544,45 @@ function initTrainer() {
     };
 
     board = Chessboard('board', config);
+
+    stats = loadStats();
+    renderStats();
+
+    const resetStatsBtn = document.getElementById('resetStatsBtn');
+    if (resetStatsBtn) resetStatsBtn.addEventListener('click', resetStats);
+
+    // Right-click on the board cancels all queued premoves (lichess-style).
+    const boardEl = document.getElementById('board');
+    if (boardEl) {
+        boardEl.addEventListener('contextmenu', function (e) {
+            e.preventDefault();
+            if (premoves.length > 0) {
+                clearPremoves('user_right_click', { removeHighlights: true, snapBoard: true });
+                updateTimerDisplay();
+            }
+        });
+    }
+
+    // Keyboard shortcut: N = new position (ignored while typing in inputs).
+    document.addEventListener('keydown', function (e) {
+        if (e.key !== 'n' && e.key !== 'N') return;
+        const tag = e.target && e.target.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        resetBoard();
+    });
+
+    // chessboard.js rebuilds the square DOM on resize, which drops our
+    // highlight classes and preview — re-apply them.
+    window.addEventListener('resize', function () {
+        if (!board) return;
+        board.resize();
+        if (premoves.length > 0) {
+            updatePremovePreview();
+            renderPremoveHighlights();
+        } else {
+            board.position(game.fen(), false);
+        }
+    });
 
     const slider = document.getElementById('blackDelay');
     const valueDisplay = document.getElementById('blackDelayValue');

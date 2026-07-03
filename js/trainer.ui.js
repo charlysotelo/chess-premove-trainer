@@ -31,7 +31,6 @@ function updateScenarioVideo() {
 }
 
 function removeHighlights() {
-    $('#board .square-55d63').removeClass('square-premove-highlight');
     $('#board .square-55d63').removeClass('square-real-highlight');
     $('#board .square-55d63').removeClass('square-premove-dest-highlight');
 }
@@ -88,7 +87,12 @@ function updateStatus() {
     let status = '';
 
     if (game.in_checkmate()) {
-        status = '<span class="success">Checkmate! You won! 🎉</span>';
+        // game.turn() is the side to move, i.e. the side that got mated.
+        if (game.turn() === 'b') {
+            status = `<span class="success">Checkmate! You won with ${whiteTime.toFixed(1)}s to spare! 🎉</span>`;
+        } else {
+            status = '<span class="fail">Checkmate — White got mated!</span>';
+        }
     } else if (game.in_stalemate()) {
         status = 'Stalemate - Draw';
     } else if (game.in_draw()) {
@@ -126,6 +130,17 @@ function updateTimerDisplay() {
     } else {
         blackTimerEl.classList.add('active');
     }
+}
+
+function renderStats() {
+    const el = document.getElementById('statsLine');
+    if (!el) return;
+
+    let text = `Wins: ${stats.wins} · Losses: ${stats.losses} · Draws: ${stats.draws}`;
+    if (stats.bestRemaining !== null) {
+        text += ` · Best mate: ${stats.bestRemaining.toFixed(1)}s left`;
+    }
+    el.textContent = text;
 }
 
 function setCustomFenError(message) {
