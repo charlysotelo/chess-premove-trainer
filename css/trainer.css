@@ -73,6 +73,12 @@ body.board-max #board {
     width: min(calc(100vh - 170px), calc(100vw - 40px));
 }
 
+/* !important because updateScenarioVideo() drives the tile's inline
+   display style; maximized mode must win over it. */
+body.board-max #videoTile {
+    display: none !important;
+}
+
 #videoTile {
     width: min(560px, calc(100vw - 40px));
 }
